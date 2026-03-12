@@ -3,6 +3,9 @@ trafficorch
 trafficorch-*
 *.exe
 bin/
+# Allow release binaries:
+!trafficorch-linux-amd64
+!trafficorch-windows-amd64.exe
 
 # ─── Test artefacts ───────────────────────────────────────────────────────────
 *.test
