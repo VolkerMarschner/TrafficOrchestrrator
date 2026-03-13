@@ -13,10 +13,66 @@ import (
 // AgentConfFile is the legacy filename kept for internal references.
 const AgentConfFile = "agent.conf"
 
-// ToConfFile is the primary auto-start configuration file (v0.3.1+).
-// When the binary is invoked without arguments it looks for this file.
-// Format is identical to agent.conf (KEY=VALUE: MASTER, PORT, PSK, ID).
+// ToConfFile is the unified auto-start configuration file (v0.3.1+).
+// When the binary is invoked without arguments it looks for this file and
+// auto-detects whether to start as master or agent based on its content.
 const ToConfFile = "to.conf"
+
+// ToConfModeMaster and ToConfModeAgent are the return values of DetectToConfMode.
+const (
+	ToConfModeMaster = "master"
+	ToConfModeAgent  = "agent"
+)
+
+// DetectToConfMode reads the first meaningful lines of path and returns
+// ToConfModeMaster or ToConfModeAgent:
+//
+//   - "[MASTER]" section header   → master (traffic config format)
+//   - "TCP …" / "UDP …" rule line → master
+//   - "MASTER=<host>" key=value   → agent
+//
+// Returns an error if the file cannot be opened or the mode cannot be determined.
+func DetectToConfMode(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// INI section header [MASTER] → traffic / master config
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			return ToConfModeMaster, nil
+		}
+
+		// Traffic rule line: starts with TCP or UDP → master config
+		upper := strings.ToUpper(line)
+		if strings.HasPrefix(upper, "TCP ") || strings.HasPrefix(upper, "UDP ") {
+			return ToConfModeMaster, nil
+		}
+
+		// Key=value line
+		if idx := strings.Index(line, "="); idx != -1 {
+			key := strings.TrimSpace(strings.ToUpper(line[:idx]))
+			if key == "MASTER" {
+				// "MASTER=<host>" means this is an agent connection config
+				return ToConfModeAgent, nil
+			}
+			// Other key=value lines (PORT, PSK, target defs) — keep scanning
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("read error in %s: %w", path, err)
+	}
+	return "", fmt.Errorf("cannot determine mode from %s (no [MASTER] section, no TCP/UDP rules, no MASTER= key found)", path)
+}
 
 // LoadAgentConf reads an AgentConfig from a file written by SaveAgentConf.
 // Supported keys (case-insensitive): MASTER, PORT, PSK, ID.

@@ -44,29 +44,38 @@ func main() {
 // tryAutoStart is invoked when no arguments are supplied.
 //
 // Behaviour (v0.3.1+):
-//  1. to.conf found and valid → load and start as agent
-//  2. to.conf found but invalid → print the specific error and exit 1
-//  3. to.conf not found → print help and exit 0
+//  1. to.conf not found               → print help and exit 0
+//  2. to.conf found, mode = master    → start as master (traffic config format)
+//  3. to.conf found, mode = agent     → start as agent (connection config format)
+//  4. to.conf found, mode undetected  → print error and exit 1
 func tryAutoStart() {
-	cfg, err := config.LoadAgentConf(config.ToConfFile)
-	if err == nil {
-		fmt.Printf("Traffic Orchestrator v%s — loading from %s\n", version, config.ToConfFile)
-		startAgent(cfg)
-		return
-	}
+	mode, err := config.DetectToConfMode(config.ToConfFile)
 
-	// Distinguish between "file missing" and "file broken".
-	if !os.IsNotExist(err) {
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Printf("Traffic Orchestrator v%s\n\n", version)
+			fmt.Printf("%s not found in current directory.\n\n", config.ToConfFile)
+			printUsage()
+			os.Exit(0)
+		}
 		fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", config.ToConfFile, err)
 		fmt.Fprintf(os.Stderr, "Fix or delete %s and try again.\n", config.ToConfFile)
 		os.Exit(1)
 	}
 
-	// File does not exist — show help.
-	fmt.Printf("Traffic Orchestrator v%s\n\n", version)
-	fmt.Printf("%s not found in current directory.\n\n", config.ToConfFile)
-	printUsage()
-	os.Exit(0)
+	switch mode {
+	case config.ToConfModeMaster:
+		fmt.Printf("Traffic Orchestrator v%s — master mode from %s\n", version, config.ToConfFile)
+		startMasterFromFile(config.ToConfFile)
+	case config.ToConfModeAgent:
+		fmt.Printf("Traffic Orchestrator v%s — agent mode from %s\n", version, config.ToConfFile)
+		cfg, err := config.LoadAgentConf(config.ToConfFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", config.ToConfFile, err)
+			os.Exit(1)
+		}
+		startAgent(cfg)
+	}
 }
 
 func printUsage() {
@@ -160,6 +169,22 @@ func handleMasterMode(args []string) {
 		masterCfg.PSK = cfg.PSK
 	}
 
+	runMaster(masterCfg)
+}
+
+// startMasterFromFile loads a master config directly from a file path and starts
+// the master server. Used by tryAutoStart when to.conf is in master format.
+func startMasterFromFile(configPath string) {
+	masterCfg, err := config.ParseExtendedConfigV2(configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading %s: %v\n", configPath, err)
+		os.Exit(1)
+	}
+	runMaster(masterCfg)
+}
+
+// runMaster validates the PSK, sets up logging, and runs the master server.
+func runMaster(masterCfg *config.MasterConfig) {
 	if err := netutils.ValidatePSKStrength(masterCfg.PSK); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: PSK does not meet security requirements: %v\n", err)
 		os.Exit(1)
