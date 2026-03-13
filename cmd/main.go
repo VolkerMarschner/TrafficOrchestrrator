@@ -44,16 +44,25 @@ func main() {
 // tryAutoStart is invoked when no arguments are supplied.
 //
 // Behaviour (v0.3.1+):
-//  1. to.conf found in the current directory → load and start as agent
-//  2. to.conf not found → print help and exit
+//  1. to.conf found and valid → load and start as agent
+//  2. to.conf found but invalid → print the specific error and exit 1
+//  3. to.conf not found → print help and exit 0
 func tryAutoStart() {
-	if cfg, err := config.LoadAgentConf(config.ToConfFile); err == nil {
+	cfg, err := config.LoadAgentConf(config.ToConfFile)
+	if err == nil {
 		fmt.Printf("Traffic Orchestrator v%s — loading from %s\n", version, config.ToConfFile)
 		startAgent(cfg)
 		return
 	}
 
-	// to.conf not present — show help.
+	// Distinguish between "file missing" and "file broken".
+	if !os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "Error reading %s: %v\n", config.ToConfFile, err)
+		fmt.Fprintf(os.Stderr, "Fix or delete %s and try again.\n", config.ToConfFile)
+		os.Exit(1)
+	}
+
+	// File does not exist — show help.
 	fmt.Printf("Traffic Orchestrator v%s\n\n", version)
 	fmt.Printf("%s not found in current directory.\n\n", config.ToConfFile)
 	printUsage()
