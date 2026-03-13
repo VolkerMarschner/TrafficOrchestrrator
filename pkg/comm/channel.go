@@ -219,10 +219,8 @@ func (s *MasterServer) handleConnection(conn net.Conn) {
 	}
 	s.mu.Unlock()
 
-	if s.onRegister != nil {
-		s.onRegister(regMsg.AgentID, regMsg.Hostname)
-	}
-
+	// Send ACK before invoking onRegister: the callback may push a CONFIG_UPDATE
+	// and the agent must receive REGISTER_ACK first.
 	ack := &RegisterAckMessage{
 		BaseMessage: BaseMessage{
 			Type:      MsgRegisterAck,
@@ -237,6 +235,12 @@ func (s *MasterServer) handleConnection(conn net.Conn) {
 		log.Printf("comm: failed to send ACK to %s: %v", regMsg.AgentID, err)
 		s.removeAgent(regMsg.AgentID)
 		return
+	}
+
+	// Notify asynchronously so processMessages can start without waiting for
+	// the callback (which may sleep before sending the initial CONFIG_UPDATE).
+	if s.onRegister != nil {
+		go s.onRegister(regMsg.AgentID, regMsg.Hostname)
 	}
 
 	s.processMessages(channel, regMsg.AgentID)
