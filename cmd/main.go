@@ -11,10 +11,10 @@ import (
 	"trafficorch/pkg/netutils"
 )
 
-const version = "0.3.0"
+const version = "0.3.1"
 
 func main() {
-	// No arguments: try agent.conf → try instructions.conf → print help.
+	// No arguments: try to.conf → print help.
 	if len(os.Args) < 2 {
 		tryAutoStart()
 		return
@@ -43,29 +43,19 @@ func main() {
 
 // tryAutoStart is invoked when no arguments are supplied.
 //
-// Priority order:
-//  1. agent.conf  → start as connected agent (needs master reachable)
-//  2. instructions.conf → start in standalone mode (no master required)
-//  3. Neither found → print help
+// Behaviour (v0.3.1+):
+//  1. to.conf found in the current directory → load and start as agent
+//  2. to.conf not found → print help and exit
 func tryAutoStart() {
-	// 1. Try agent.conf (requires live master connection).
-	if cfg, err := config.LoadAgentConf(config.AgentConfFile); err == nil {
-		fmt.Printf("Traffic Orchestrator v%s — loading from %s\n", version, config.AgentConfFile)
+	if cfg, err := config.LoadAgentConf(config.ToConfFile); err == nil {
+		fmt.Printf("Traffic Orchestrator v%s — loading from %s\n", version, config.ToConfFile)
 		startAgent(cfg)
 		return
 	}
 
-	// 2. Try instructions.conf (standalone mode, no master required).
-	if _, err := config.LoadInstructionsConf(config.InstructionsConfFile); err == nil {
-		fmt.Printf("Traffic Orchestrator v%s — loading from %s (standalone mode)\n", version, config.InstructionsConfFile)
-		startStandalone(masterConnInfo{}, "")
-		return
-	}
-
-	// 3. Neither file found — show help.
+	// to.conf not present — show help.
 	fmt.Printf("Traffic Orchestrator v%s\n\n", version)
-	fmt.Printf("No mode specified and neither %s nor %s found in current directory.\n\n",
-		config.AgentConfFile, config.InstructionsConfFile)
+	fmt.Printf("%s not found in current directory.\n\n", config.ToConfFile)
 	printUsage()
 	os.Exit(0)
 }
@@ -91,8 +81,8 @@ Modes:
       --psk    <KEY>    Pre-shared key (required on first run)
       --id     <ID>     Agent identifier (optional)
 
-    First run: supply all flags. They are saved to agent.conf and
-    instructions.conf for subsequent starts.
+    First run: supply all flags. They are saved to to.conf for subsequent
+    starts, and rules received from the master are saved to instructions.conf.
 
     Subsequent runs: just run  trafficorch  with no arguments.
     The agent reconnects to the master. If the master is unreachable,
@@ -105,8 +95,10 @@ Modes:
   --help, -h      Show this help message
 
 Auto-start:
-  No arguments:  trafficorch checks agent.conf, then instructions.conf.
-  Delete both files to reset to interactive startup.
+  No arguments:  trafficorch looks for to.conf in the current directory.
+  Found:     loads values and starts as agent.
+  Not found: prints this help message.
+  Delete to.conf to reset to interactive startup.
 
 Non-root warning:
   On Linux/macOS, running as non-root restricts port binding to > 1024.
@@ -191,7 +183,7 @@ func handleMasterMode(args []string) {
 	}
 }
 
-// handleAgentMode parses CLI flags, persists them as agent.conf, then starts
+// handleAgentMode parses CLI flags, persists them as to.conf, then starts
 // the agent. Falls back to auto-start if no flags are supplied.
 func handleAgentMode(args []string) {
 	if len(args) == 0 {
@@ -207,10 +199,10 @@ func handleAgentMode(args []string) {
 	}
 
 	// Persist for the next run.
-	if saveErr := config.SaveAgentConf(config.AgentConfFile, cfg); saveErr != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not save %s: %v\n", config.AgentConfFile, saveErr)
+	if saveErr := config.SaveAgentConf(config.ToConfFile, cfg); saveErr != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not save %s: %v\n", config.ToConfFile, saveErr)
 	} else {
-		fmt.Printf("Configuration saved to %s.\n", config.AgentConfFile)
+		fmt.Printf("Configuration saved to %s.\n", config.ToConfFile)
 	}
 
 	startAgent(cfg)
