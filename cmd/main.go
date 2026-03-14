@@ -10,26 +10,71 @@ import (
 	"trafficorch/pkg/config"
 	"trafficorch/pkg/logging"
 	"trafficorch/pkg/netutils"
+	"trafficorch/pkg/registry"
 )
 
-const version = "0.4.0"
+const version = "0.4.5"
 
 func main() {
-	// No arguments: try to.conf → print help.
-	if len(os.Args) < 2 {
+	args := os.Args[1:]
+
+	// ── Detect and strip internal daemon-child sentinel ───────────────────────
+	// When the process was launched by daemonize(), --daemon-child is appended
+	// to signal that we are already the background process.
+	daemonChild := false
+	{
+		filtered := args[:0]
+		for _, a := range args {
+			if a == "--daemon-child" {
+				daemonChild = true
+			} else {
+				filtered = append(filtered, a)
+			}
+		}
+		args = filtered
+	}
+	if daemonChild {
+		writePIDFile(pidFile)
+	}
+
+	// ── Detect and strip -d / --daemon flag ───────────────────────────────────
+	daemon := false
+	{
+		filtered := args[:0]
+		for _, a := range args {
+			if a == "-d" || a == "--daemon" {
+				daemon = true
+			} else {
+				filtered = append(filtered, a)
+			}
+		}
+		args = filtered
+	}
+	if daemon && !daemonChild {
+		if err := daemonize(args); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to start daemon: %v\n", err)
+			os.Exit(1)
+		}
+		return // unreachable — daemonize calls os.Exit(0)
+	}
+
+	config.DebugMode = false
+
+	// ── No arguments: auto-start from to.conf ─────────────────────────────────
+	if len(args) == 0 {
 		tryAutoStart()
 		return
 	}
 
-	mode := os.Args[1]
-
-	config.DebugMode = false
+	mode := args[0]
 
 	switch mode {
 	case "--master", "-m":
-		handleMasterMode(os.Args[2:])
+		handleMasterMode(args[1:])
 	case "--agent", "-a":
-		handleAgentMode(os.Args[2:])
+		handleAgentMode(args[1:])
+	case "--status", "-s":
+		handleStatusMode()
 	case "--version", "-v":
 		fmt.Printf("Traffic Orchestrator v%s\n", version)
 		os.Exit(0)
@@ -43,12 +88,6 @@ func main() {
 }
 
 // tryAutoStart is invoked when no arguments are supplied.
-//
-// Behaviour (v0.3.1+):
-//  1. to.conf not found               → print help and exit 0
-//  2. to.conf found, mode = master    → start as master (traffic config format)
-//  3. to.conf found, mode = agent     → start as agent (connection config format)
-//  4. to.conf found, mode undetected  → print error and exit 1
 func tryAutoStart() {
 	mode, err := config.DetectToConfMode(config.ToConfFile)
 
@@ -79,12 +118,27 @@ func tryAutoStart() {
 	}
 }
 
+// handleStatusMode prints the agent registry table to stdout.
+func handleStatusMode() {
+	reg, err := registry.New(registryFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Cannot load agent registry (%s): %v\n", registryFile, err)
+		os.Exit(1)
+	}
+	fmt.Printf("Traffic Orchestrator v%s — Agent Registry\n\n", version)
+	reg.PrintTable(os.Stdout)
+}
+
 func printUsage() {
 	fmt.Printf(`Traffic Orchestrator — Network Traffic Generator
 
 Version: %s
 
-Usage: trafficorch <mode> [options]
+Usage: trafficorch [options] <mode> [mode-options]
+
+Global options:
+  -d, --daemon    Run as a background daemon (detached from terminal).
+                  A PID file is written to trafficorch.pid in the working directory.
 
 Modes:
   --master, -m    Run as Master (coordinates agents)
@@ -104,24 +158,33 @@ Modes:
     starts, and rules received from the master are saved to instructions.conf.
 
     Subsequent runs: just run  trafficorch  with no arguments.
-    The agent reconnects to the master. If the master is unreachable,
-    traffic continues from instructions.conf (standalone mode).
 
-    Standalone mode: the agent enforces the last set of rules received
-    from the master. After the TTL expires it reconnects automatically.
+  --status, -s    Print a table of all known agents and their status.
+                  Reads agents.json written by the master.
 
   --version, -v   Show version information
   --help, -h      Show this help message
 
+Deployment (v0.4.5+):
+  Bootstrap new agent:
+    curl -O http://<master-ip>:9001/binary && chmod +x binary
+    ./binary --agent --master <master-ip> --port 9000 --psk <key>
+
+  Auto-update:
+    The master serves its own binary on port 9001. When an agent connects
+    with an older version, the master sends an UPDATE_AVAILABLE notification.
+    The agent downloads, verifies (SHA-256) and restarts itself automatically.
+
+  HTTP endpoints on port 9001:
+    GET /binary   — Download the master binary
+    GET /sha256   — SHA-256 checksum of the binary
+    GET /version  — Current master version
+    GET /agents   — Agent registry as JSON
+
 Auto-start:
   No arguments:  trafficorch looks for to.conf in the current directory.
-  Found:     loads values and starts as agent.
+  Found:     loads values and starts as agent or master.
   Not found: prints this help message.
-  Delete to.conf to reset to interactive startup.
-
-Non-root warning:
-  On Linux/macOS, running as non-root restricts port binding to > 1024.
-  A warning is printed and sent to the master.
 
 Environment variables:
   TRAFFICORCH_PSK        Pre-shared key (alternative to --psk)
@@ -146,6 +209,11 @@ func resolveLogPath(filename string) (string, error) {
 	}
 
 	return filepath.Join(absDir, filename), nil
+}
+
+// writePIDFile writes the current process PID to path (best-effort, errors are ignored).
+func writePIDFile(path string) {
+	_ = os.WriteFile(path, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0644)
 }
 
 func handleMasterMode(args []string) {

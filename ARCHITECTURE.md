@@ -1,9 +1,9 @@
 # Traffic Orchestrator — Technical Architecture
 
-**Version:** 0.4
+**Version:** 0.4.5
 **Author:** Claudia (Lead Architect)
 **Date:** 2026-03-13
-**Status:** ✅ Updated — v0.4.0 profile system (role-based traffic profiles, host assignments, tag groups) incorporated
+**Status:** ✅ Updated — v0.4.5: daemon mode, binary distribution, agent registry, self-update incorporated
 
 ---
 
@@ -1141,6 +1141,97 @@ falls back to the v0.3.0 direct-rule distribution logic.
 
 ---
 
-**Document Status:** ✅ Updated — v0.4.0 implemented and tested
-**Last updated:** 2026-03-13
+
+## 15. Deployment & Maintenance (v0.4.5)
+
+### 15.1 Daemon Mode
+
+Both master and agent can be started as a background process with `-d` / `--daemon`:
+
+```bash
+# Start master as daemon
+./trafficorch -d --master --config to.conf
+
+# Start agent as daemon
+./trafficorch -d --agent --master 10.0.0.1 --port 9000 --psk mysecretkey
+```
+
+The parent process prints the child PID and exits immediately.
+A PID file (`trafficorch.pid`) is written to the working directory.
+
+**Implementation:**
+- Non-Windows: `exec.Command + SysProcAttr{Setsid:true}` — fully detached from terminal
+- Windows: `CreationFlags: DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`
+
+### 15.2 Binary Distribution Server (Port 9001)
+
+The master automatically starts an HTTP server on **port 9001** that serves:
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /binary`  | The master binary as `application/octet-stream` |
+| `GET /sha256`  | Hex SHA-256 checksum of the binary |
+| `GET /version` | Current master version string |
+| `GET /agents`  | Agent registry as JSON array |
+
+**Bootstrap new agent without prior installation:**
+```bash
+curl -O http://<master-ip>:9001/binary
+chmod +x binary
+./binary --agent --master <master-ip> --port 9000 --psk <key>
+```
+
+No PSK is required for the binary download — the binary itself is not a secret.
+Authentication happens on the control channel (port 9000) via PSK.
+
+### 15.3 Agent Registry (`agents.json`)
+
+The master maintains a persistent JSON registry of all agents:
+
+```json
+[
+  {
+    "id": "agent-dc01",
+    "hostname": "DC01",
+    "ip": "10.0.0.10",
+    "version": "0.4.5",
+    "platform": "linux/amd64",
+    "first_seen": "2026-03-14T10:00:00Z",
+    "last_seen": "2026-03-14T11:23:45Z",
+    "status": "online"
+  }
+]
+```
+
+View the registry on the master node:
+```bash
+./trafficorch --status
+```
+
+Or fetch remotely:
+```bash
+curl http://<master-ip>:9001/agents | jq .
+```
+
+### 15.4 Automatic Self-Update
+
+When an agent connects with a version **older** than the master, the master:
+
+1. Sends an `UPDATE_AVAILABLE` message over the control channel (port 9000)
+2. The message includes: `new_version`, `http_port`, `sha256`
+
+The agent then:
+1. Downloads the binary from `http://<master-host>:<http_port>/binary`
+2. Verifies the SHA-256 checksum against the value from the signed control message
+3. Replaces the current binary and restarts:
+   - **Linux/macOS:** atomic `os.Rename()` + `syscall.Exec()` (same PID group)
+   - **Windows:** downloads as `trafficorch_new.exe`, launches a helper `.bat` that swaps the files after process exit
+
+Each agent is notified **at most once per connection session**. If the update fails, the agent continues running and will be notified again on its next connection.
+
+---
+
+**Document Status:** ✅ Updated — v0.4.5 implemented and tested
+**Last updated:** 2026-03-14
+**Changes in v0.4.5:** Daemon mode (-d), binary distribution (port 9001), agent registry (agents.json), self-update via control channel
 **Changes in v0.4.0:** Profile system — `.profile` files, host tagging, `[ASSIGNMENTS]`, SELF/group/ANY placeholders, EXTENDS inheritance, backward-compatible with v0.3.x direct rules

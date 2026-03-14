@@ -129,16 +129,20 @@ type agentConn struct {
 	channel  *Channel
 	remoteIP string // extracted from TCP remote address (or self-reported by agent)
 	hostname string // self-reported in REGISTER
+	version  string // binary version reported by agent in REGISTER / HEARTBEAT
+	platform string // OS/arch reported by agent in REGISTER
 }
 
 // MasterServer listens for incoming agent connections and dispatches messages.
 type MasterServer struct {
-	listener   net.Listener
-	psk        string
-	agents     map[string]*agentConn
-	mu         sync.RWMutex
-	onRegister func(agentID string, hostname string)
-	onTraffic  func(agentID string, rules []*TrafficRule)
+	listener     net.Listener
+	psk          string
+	agents       map[string]*agentConn
+	mu           sync.RWMutex
+	onRegister   func(agentID string, hostname string)
+	onTraffic    func(agentID string, rules []*TrafficRule)
+	onHeartbeat  func(agentID string, hb HeartbeatMessage)  // optional: called on every heartbeat
+	onDisconnect func(agentID string)                        // optional: called when agent disconnects
 }
 
 // NewMasterServer creates a MasterServer that listens on port, authenticates
@@ -216,6 +220,8 @@ func (s *MasterServer) handleConnection(conn net.Conn) {
 		channel:  channel,
 		remoteIP: remoteIP,
 		hostname: regMsg.Hostname,
+		version:  regMsg.AgentVersion,
+		platform: regMsg.Platform,
 	}
 	s.mu.Unlock()
 
@@ -268,6 +274,17 @@ func (s *MasterServer) processMessages(channel *Channel, agentID string) {
 			}
 			log.Printf("comm: heartbeat from %s – CPU %.1f%% MEM %dMB active-rules %d",
 				agentID, hb.CPUUsage, hb.MemoryUsage/1024/1024, hb.ActiveRules)
+		// Update stored version if the agent reported one.
+		if hb.AgentVersion != "" {
+			s.mu.Lock()
+			if ac, ok := s.agents[agentID]; ok {
+				ac.version = hb.AgentVersion
+			}
+			s.mu.Unlock()
+		}
+		if s.onHeartbeat != nil {
+			go s.onHeartbeat(agentID, hb)
+		}
 
 		case MsgStatus:
 			var status StatusMessage
@@ -301,11 +318,45 @@ func (s *MasterServer) processMessages(channel *Channel, agentID string) {
 
 func (s *MasterServer) removeAgent(agentID string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if ac, ok := s.agents[agentID]; ok {
-		ac.channel.Close()
+	_, existed := s.agents[agentID]
+	if existed {
+		s.agents[agentID].channel.Close()
 		delete(s.agents, agentID)
 	}
+	s.mu.Unlock()
+	if existed && s.onDisconnect != nil {
+		go s.onDisconnect(agentID)
+	}
+}
+
+// SetOnHeartbeat registers a callback invoked on every agent heartbeat.
+func (s *MasterServer) SetOnHeartbeat(fn func(agentID string, hb HeartbeatMessage)) {
+	s.onHeartbeat = fn
+}
+
+// SetOnDisconnect registers a callback invoked when an agent disconnects.
+func (s *MasterServer) SetOnDisconnect(fn func(agentID string)) {
+	s.onDisconnect = fn
+}
+
+// GetAgentVersion returns the last reported binary version of agentID.
+func (s *MasterServer) GetAgentVersion(agentID string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if ac, ok := s.agents[agentID]; ok {
+		return ac.version
+	}
+	return ""
+}
+
+// GetAgentPlatform returns the OS/arch platform string of agentID.
+func (s *MasterServer) GetAgentPlatform(agentID string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if ac, ok := s.agents[agentID]; ok {
+		return ac.platform
+	}
+	return ""
 }
 
 // GetAgents returns the IDs of all currently connected agents.
@@ -452,16 +503,18 @@ func NewAgentClient(master string, port int, psk string) (*AgentClient, error) {
 }
 
 // Register sends a REGISTER message to the master and waits for acknowledgement.
-func (c *AgentClient) Register(agentID string, hostname string, platform string) error {
+// agentVersion is the binary version string (e.g. "0.4.5").
+func (c *AgentClient) Register(agentID string, hostname string, platform string, agentVersion string) error {
 	msg := &RegisterMessage{
 		BaseMessage: BaseMessage{
 			Type:      MsgRegister,
 			Timestamp: time.Now().Unix(),
 			Version:   ProtocolVersion,
 		},
-		AgentID:  agentID,
-		Hostname: hostname,
-		Platform: platform,
+		AgentID:      agentID,
+		Hostname:     hostname,
+		Platform:     platform,
+		AgentVersion: agentVersion,
 	}
 
 	if err := c.channel.WriteMessage(msg); err != nil {
@@ -489,7 +542,7 @@ func (c *AgentClient) Register(agentID string, hostname string, platform string)
 	// Send an initial heartbeat to confirm the channel is alive.
 	go func() {
 		time.Sleep(1 * time.Second)
-		_ = c.SendHeartbeat(0.0, 0, 0)
+		_ = c.SendHeartbeat("", 0.0, 0, 0)
 	}()
 
 	return nil
@@ -508,17 +561,18 @@ func (c *AgentClient) StartTraffic(rules []*TrafficRule) error {
 	return c.channel.WriteMessage(msg)
 }
 
-// SendHeartbeat sends a heartbeat with the current resource metrics to the master.
-func (c *AgentClient) SendHeartbeat(cpuUsage float64, memoryUsage int64, activeRules int) error {
+// SendHeartbeat sends a heartbeat with version and resource metrics to the master.
+func (c *AgentClient) SendHeartbeat(agentVersion string, cpuUsage float64, memoryUsage int64, activeRules int) error {
 	msg := &HeartbeatMessage{
 		BaseMessage: BaseMessage{
 			Type:      MsgHeartbeat,
 			Timestamp: time.Now().Unix(),
 			Version:   ProtocolVersion,
 		},
-		CPUUsage:    cpuUsage,
-		MemoryUsage: memoryUsage,
-		ActiveRules: activeRules,
+		AgentVersion: agentVersion,
+		CPUUsage:     cpuUsage,
+		MemoryUsage:  memoryUsage,
+		ActiveRules:  activeRules,
 	}
 	return c.channel.WriteMessage(msg)
 }

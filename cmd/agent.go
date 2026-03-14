@@ -17,6 +17,7 @@ import (
 	"trafficorch/pkg/config"
 	"trafficorch/pkg/logging"
 	"trafficorch/pkg/traffic"
+	"trafficorch/pkg/update"
 )
 
 // masterConnInfo holds the details needed to (re)connect to a master.
@@ -57,7 +58,7 @@ func NewAgent(cfg *config.AgentConfig, logger *logging.Logger) (*Agent, error) {
 	platform := fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH)
 
 	logger.Info(fmt.Sprintf("Agent connecting to master at %s:%d", cfg.MasterHost, cfg.Port))
-	if err := client.Register(cfg.AgentID, hostname, platform); err != nil {
+	if err := client.Register(cfg.AgentID, hostname, platform, version); err != nil {
 		client.Close()
 		return nil, fmt.Errorf("failed to register with master: %w", err)
 	}
@@ -256,10 +257,44 @@ func (a *Agent) receiveMessages() {
 		case comm.MsgTrafficStop:
 			a.stopTraffic()
 
+		case comm.MsgUpdateAvailable:
+			var updateMsg comm.UpdateAvailableMessage
+			if err := json.Unmarshal(msgBytes, &updateMsg); err == nil {
+				a.logger.Info(fmt.Sprintf("Update available: v%s (current: v%s)", updateMsg.NewVersion, version))
+				go a.applyUpdate(updateMsg)
+			}
+
 		default:
 			a.logger.Warn(fmt.Sprintf("Unknown message type: %s", msg.Type))
 		}
 	}
+}
+
+// applyUpdate downloads and installs a newer binary from the master's distribution
+// server, then re-executes the new binary (Linux/macOS) or triggers a helper script (Windows).
+func (a *Agent) applyUpdate(msg comm.UpdateAvailableMessage) {
+	exe, err := os.Executable()
+	if err != nil {
+		a.logger.Error(fmt.Sprintf("Self-update: cannot locate own binary: %v", err))
+		return
+	}
+
+	downloadURL := fmt.Sprintf("http://%s:%d/binary", a.masterCfg.host, msg.HTTPPort)
+	a.logger.Info(fmt.Sprintf("Self-update: downloading v%s from %s", msg.NewVersion, downloadURL))
+
+	// Pass current args to the restarted process, minus the internal --daemon-child flag.
+	restartArgs := make([]string, 0, len(os.Args)-1)
+	for _, arg := range os.Args[1:] {
+		if arg != "--daemon-child" {
+			restartArgs = append(restartArgs, arg)
+		}
+	}
+
+	if err := update.Apply(downloadURL, msg.SHA256, exe, restartArgs); err != nil {
+		a.logger.Error(fmt.Sprintf("Self-update failed: %v", err))
+		return
+	}
+	// On success, Apply never returns — it exec's the new binary or calls os.Exit.
 }
 
 // saveInstructions persists the received rules and connection info to instructions.conf.
@@ -412,7 +447,7 @@ func (a *Agent) sendHeartbeatLoop() {
 			activeRules := len(a.currentRules)
 			a.mu.RUnlock()
 
-			if err := a.client.SendHeartbeat(cpuUsage, memUsage, activeRules); err != nil {
+			if err := a.client.SendHeartbeat(version, cpuUsage, memUsage, activeRules); err != nil {
 				a.logger.Warn(fmt.Sprintf("Failed to send heartbeat: %v", err))
 			}
 
@@ -470,7 +505,7 @@ func (a *Agent) reconnectToMaster() {
 		hostname, _ := os.Hostname()
 		platform := fmt.Sprintf("%s/%s", runtime.GOOS, runtime.GOARCH)
 
-		if err := client.Register(a.agentID, hostname, platform); err != nil {
+		if err := client.Register(a.agentID, hostname, platform, version); err != nil {
 			client.Close()
 			a.logger.Warn(fmt.Sprintf("Reconnect registration failed: %v — retrying in 30s", err))
 			select {

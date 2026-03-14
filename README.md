@@ -13,9 +13,15 @@ It creates realistic Layer 3/4 flows (TCP connections, UDP datagrams) between ho
 - [Usage](#usage)
   - [Master mode](#master-mode)
   - [Agent mode](#agent-mode)
+  - [Daemon mode](#daemon-mode-v045)
+  - [Status command](#status-command-v045)
   - [Auto-start via agent.conf](#auto-start-via-agentconf)
   - [Standalone mode via instructions.conf](#standalone-mode-via-instructionsconf)
   - [Environment variables](#environment-variables)
+- [Deployment at scale (v0.4.5)](#deployment-at-scale-v045)
+  - [Bootstrap new agents](#bootstrap-new-agents)
+  - [Auto-update](#auto-update)
+  - [Agent registry](#agent-registry)
 - [Configuration file format](#configuration-file-format)
   - [Simple format](#simple-format-legacy)
   - [Extended format](#extended-format-source--dest)
@@ -164,6 +170,25 @@ The agent will:
 > and the rules received from the master are saved to `instructions.conf`.
 > On the next start without arguments `to.conf` is loaded automatically.
 
+### Daemon mode (v0.4.5)
+
+Add `-d` or `--daemon` before the mode flag to detach from the terminal:
+
+```bash
+./trafficorch -d --master --config traffic.conf
+./trafficorch -d --agent --master 10.0.0.1 --port 9000 --psk YourKey123
+```
+
+The parent prints the child PID and exits immediately. A `trafficorch.pid` file is written to the current directory.
+
+### Status command (v0.4.5)
+
+Print all known agents with their version, IP, and status:
+
+```bash
+./trafficorch --status
+```
+
 ### Auto-start via to.conf
 
 Starting from **v0.3.1**, trafficorch uses a single file called `to.conf` as
@@ -253,6 +278,48 @@ trafficorch --help      # print full usage
 | `TRAFFICORCH_LOG_DIR` | Directory for log files (`traffic.log` / `agent.log`) | `.` (current dir) |
 
 Copy `.env.example` → `.env` and adjust values; then `source .env` before running.
+
+---
+
+## Deployment at scale (v0.4.5)
+
+### Bootstrap new agents
+
+The master automatically serves its own binary over HTTP on **port 9001** — no PSK required for the download:
+
+```bash
+# On a fresh host with no binary yet
+curl -O http://<master-ip>:9001/binary
+chmod +x binary
+./binary --agent --master <master-ip> --port 9000 --psk <key>
+```
+
+| HTTP endpoint | Description |
+|---------------|-------------|
+| `GET /binary`  | The master binary (`application/octet-stream`) |
+| `GET /sha256`  | SHA-256 checksum of the binary |
+| `GET /version` | Master version string |
+| `GET /agents`  | Agent registry as JSON |
+
+### Auto-update
+
+When an agent registers or sends a heartbeat with a version **older than the master**, the master sends an `UPDATE_AVAILABLE` message over the authenticated control channel.
+
+The agent:
+1. Downloads the binary from `http://<master-host>:9001/binary`
+2. Verifies the SHA-256 (received over the HMAC-authenticated control channel)
+3. Replaces the running binary and restarts automatically
+
+No manual intervention needed. Updates propagate to all outdated agents within one heartbeat cycle (≤ 30 s).
+
+### Agent registry
+
+The master writes `agents.json` in its working directory whenever an agent connects, sends a heartbeat, or disconnects. View it with:
+
+```bash
+./trafficorch --status          # local table view
+curl http://<master>:9001/agents | jq .  # remote JSON
+```
 
 ---
 
@@ -493,11 +560,18 @@ TrafficOrchestrator/
 │       ├── generator.go    # TCP/UDP connection generator (with random payload)
 │       └── listener.go     # TCP/UDP port listener manager (v0.3.0+)
 │
-├── profiles/               # Example .profile files (v0.4.0)
-│   ├── base_windows.profile
-│   ├── domain_controller.profile
-│   ├── windows_client.profile
-│   └── web_server.profile
+├── profiles/               # Example .profile files (v0.4.0+)
+│   ├── base_windows.profile            # Base Windows profile (NTP, WMI)
+│   ├── domain_controller.profile       # Active Directory DC
+│   ├── windows_client.profile          # Windows workstation
+│   ├── web_server.profile              # Simple web server
+│   ├── web_tier.profile                # 3-tier: frontend / reverse proxy
+│   ├── app_tier.profile                # 3-tier: application / API layer
+│   ├── db_tier.profile                 # 3-tier: database layer
+│   ├── email_server.profile            # Enterprise mail server
+│   ├── monitoring_server.profile       # Monitoring / observability
+│   ├── sap_application_server.profile  # SAP NetWeaver ABAP app server
+│   └── sap_database_server.profile     # SAP database tier (HANA/Oracle)
 │
 ├── configs/                # Config templates (safe to commit)
 │   ├── traffic-simple.conf.example

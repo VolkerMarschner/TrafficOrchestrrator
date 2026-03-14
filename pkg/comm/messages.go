@@ -10,15 +10,16 @@ import (
 type MessageType string
 
 const (
-	MsgRegister     MessageType = "REGISTER"      // Agent registers with master
-	MsgRegisterAck  MessageType = "REGISTER_ACK"  // Master acknowledges registration
-	MsgHeartbeat    MessageType = "HEARTBEAT"      // Periodic heartbeat from agent
-	MsgConfigUpdate MessageType = "CONFIG_UPDATE"  // New config loaded on master
-	MsgTrafficStart MessageType = "TRAFFIC_START"  // Start traffic generation
-	MsgTrafficStop  MessageType = "TRAFFIC_STOP"   // Stop all traffic
-	MsgStatus       MessageType = "STATUS"         // Agent status update
-	MsgError        MessageType = "ERROR"          // Error message
-	MsgWarning      MessageType = "WARNING"        // Non-fatal warning from agent
+	MsgRegister        MessageType = "REGISTER"         // Agent registers with master
+	MsgRegisterAck     MessageType = "REGISTER_ACK"     // Master acknowledges registration
+	MsgHeartbeat       MessageType = "HEARTBEAT"        // Periodic heartbeat from agent
+	MsgConfigUpdate    MessageType = "CONFIG_UPDATE"    // New config loaded on master
+	MsgTrafficStart    MessageType = "TRAFFIC_START"    // Start traffic generation
+	MsgTrafficStop     MessageType = "TRAFFIC_STOP"     // Stop all traffic
+	MsgStatus          MessageType = "STATUS"           // Agent status update
+	MsgError           MessageType = "ERROR"            // Error message
+	MsgWarning         MessageType = "WARNING"          // Non-fatal warning from agent
+	MsgUpdateAvailable MessageType = "UPDATE_AVAILABLE" // Master notifies agent of a newer binary
 )
 
 // BaseMessage is the base structure for all messages.
@@ -30,10 +31,11 @@ type BaseMessage struct {
 
 // RegisterMessage is sent by agents to register with the master.
 type RegisterMessage struct {
-	AgentID  string `json:"agent_id"`
-	Hostname string `json:"hostname,omitempty"`
-	Platform string `json:"platform,omitempty"`
-	AgentIP  string `json:"agent_ip,omitempty"` // Self-reported IP for extended-format routing
+	AgentID      string `json:"agent_id"`
+	Hostname     string `json:"hostname,omitempty"`
+	Platform     string `json:"platform,omitempty"`
+	AgentIP      string `json:"agent_ip,omitempty"`      // Self-reported IP for extended-format routing
+	AgentVersion string `json:"agent_version,omitempty"` // Binary version of the registering agent
 	BaseMessage
 }
 
@@ -48,10 +50,11 @@ type RegisterAckMessage struct {
 // HeartbeatMessage is sent periodically by agents to master.
 type HeartbeatMessage struct {
 	BaseMessage
-	AgentID     string  `json:"agent_id"`
-	CPUUsage    float64 `json:"cpu_usage,omitempty"`
-	MemoryUsage int64   `json:"memory_usage_bytes,omitempty"`
-	ActiveRules int     `json:"active_rules,omitempty"`
+	AgentID      string  `json:"agent_id"`
+	AgentVersion string  `json:"agent_version,omitempty"` // Binary version of the agent
+	CPUUsage     float64 `json:"cpu_usage,omitempty"`
+	MemoryUsage  int64   `json:"memory_usage_bytes,omitempty"`
+	ActiveRules  int     `json:"active_rules,omitempty"`
 }
 
 // ConfigUpdateMessage is sent by master to agents when config changes.
@@ -99,6 +102,16 @@ type WarningMessage struct {
 	AgentID string `json:"agent_id"`
 	Code    string `json:"code"`    // e.g. "NON_ROOT"
 	Message string `json:"message"`
+}
+
+// UpdateAvailableMessage is sent by the master when it carries a newer binary
+// than the agent's current version.  The agent downloads the binary from the
+// master's distribution HTTP server (port HTTPPort) and restarts itself.
+type UpdateAvailableMessage struct {
+	BaseMessage
+	NewVersion string `json:"new_version"`  // Version string of the new binary
+	HTTPPort   int    `json:"http_port"`    // Port of master's binary distribution server
+	SHA256     string `json:"sha256"`       // Hex-encoded SHA-256 of the binary at /binary
 }
 
 // TrafficRule represents a traffic generation rule shared between config and comm.
