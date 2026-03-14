@@ -25,7 +25,7 @@ coverage.html
 *.pfx
 .env
 vm-instance-data.txt
-FEATURE-REQUESTS.md
+FEATURE-REQUEST.md
 
 # ─── Site-specific config files (use configs/*.conf.example as templates) ─────
 config_mcl_*.conf
